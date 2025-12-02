@@ -20,10 +20,23 @@
             <artifactId>vertx-mqtt</artifactId>
             <version>5.0.5</version>
         </dependency>
+
         <dependency>
             <groupId>io.vertx</groupId>
             <artifactId>vertx-redis-client</artifactId>
             <version>5.0.5</version>
+        </dependency>
+
+        <dependency>
+            <groupId>org.bouncycastle</groupId>
+            <artifactId>bcprov-jdk18on</artifactId>
+            <version>1.81</version>
+        </dependency>
+
+        <dependency>
+            <groupId>commons-codec</groupId>
+            <artifactId>commons-codec</artifactId>
+            <version>1.18.0</version>
         </dependency>
     </dependencies>
 

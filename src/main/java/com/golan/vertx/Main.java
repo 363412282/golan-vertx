@@ -14,12 +14,16 @@ import io.vertx.redis.client.Command;
 import io.vertx.redis.client.Redis;
 import io.vertx.redis.client.RedisOptions;
 import io.vertx.redis.client.Request;
+import org.apache.commons.codec.binary.Hex;
+import org.bouncycastle.crypto.digests.Blake2bDigest;
 
+import java.math.BigInteger;
 import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 
@@ -47,9 +51,9 @@ public class Main extends AbstractVerticle {
     @Override
     public void start(Promise<Void> startPromise) {
         Future.all(
-                startMqttServer(),
-                startWebSocketServer(),
-                startRedisListener()
+            // startMqttServer(),
+            startWebSocketServer(),
+            startRedisListener()
         ).onSuccess(v -> {
             System.out.println("所有服务已成功启动 (MQTT: 1883, WS: 8080, Redis Listener: " + REDIS_CHANNEL + ")");
             startPromise.complete();
@@ -94,35 +98,33 @@ public class Main extends AbstractVerticle {
                     System.out.println("-> WebSocket client connected: " + ws.remoteAddress());
 
                     String cookieHeader = ws.headers().get("Cookie");
-                    String sessionId = extractSessionIdFromCookie(cookieHeader);
+                    String sessionToken = extractSessionIdFromCookie(cookieHeader);
 
                     // ... (Session ID 和路径校验，保持不变) ...
 
-                    System.out.println("-> WebSocket connected, Session ID: " + sessionId);
+                    System.out.println("-> WebSocket connected, Session ID: " + sessionToken);
 
                     // 1. 校验 Session ID
-                    if (sessionId == null || sessionId.isEmpty() || !ws.path().equals("/ws")) {
-                        System.out.println("   [WS] 未找到 sessionid cookie，拒绝连接。");
+                    if (sessionToken == null || sessionToken.isEmpty() ) {
+                        System.out.println("   [WS] 未找到 session token cookie，拒绝连接。");
                         ws.close();
                         return;
                     }
 
+                    Long sid = parseId(sessionToken, "Laurel");
+                    if (sid == null ) {
+                        System.out.println("   [WS] 未找到 session id，拒绝连接。");
+                        ws.close();
+                        return;
+                    }
 
-
-
-                    // 2. 异步查询 User ID (HGET)
-                    Request lookupRequest = Request.cmd(Command.HGET)
-                            .arg("session:" + sessionId)
-                            .arg("userId");
-
-                    // 使用 redisClient.send(Future) 启动异步操作
-                    redis.send(lookupRequest)
+                    redis.send(Request.cmd(Command.HGETALL).arg("s:" + Long.toString(sid, 36)))
                             .onSuccess(response -> {
-                                String tempUserId = null;
-                                if (response != null && response.toString() != null) {
-                                    tempUserId = response.toString();
-                                }
 
+                                String tempUserId = null;
+                                if (response != null && response.get("u") != null) {
+                                    tempUserId = response.get("u").toString();
+                                }
 
                                 if (tempUserId != null && !tempUserId.isEmpty()) {
 
@@ -133,6 +135,12 @@ public class Main extends AbstractVerticle {
                                     // 原子地添加连接到列表
                                     userConnections.computeIfAbsent(userId, k -> new CopyOnWriteArrayList<>()).add(ws);
                                     System.out.println("   [WS] Session authenticated. User ID: " + userId);
+
+                                    ws.handler(buffer -> {
+                                        String msg = buffer.toString(StandardCharsets.UTF_8);
+                                        System.out.println("<- Received from WS: " + msg);
+                                        // ws.writeTextMessage("Server received your WS message: " + msg);
+                                    });
 
                                     // 4. 关闭时移除连接
                                     ws.closeHandler(v -> {
@@ -146,36 +154,28 @@ public class Main extends AbstractVerticle {
                                         System.out.println("<- WebSocket closed. User ID removed: " + userId);
                                     });
 
-                                    // 5. 消息处理
-                                    ws.handler(buffer -> {
-                                        // ... 消息处理逻辑 ...
-                                        ws.writeTextMessage("Server received your WS message.");
-                                    });
+
 
                                 } else {
                                     // 找不到有效的 User ID
-                                    System.out.println("   [WS] Session ID " + sessionId + " 对应的 User ID 无效，关闭连接。");
+                                    System.out.println("   [WS] Session ID " + sessionToken + " 对应的 User ID 无效，关闭连接。");
                                     ws.close();
                                 }
                             })
                             .onFailure(cause -> {
                                 // 6. Redis 查询失败 (例如连接错误)
-                                System.err.println("❌ Redis HGET 查询失败: " + cause.getMessage() + "，关闭连接。");
+                                System.err.println("Redis HGET 查询失败: " + cause.getMessage() + "，关闭连接。");
                                 ws.close();
                             });
 
-                    ws.handler(buffer -> {
-                        String msg = buffer.toString(StandardCharsets.UTF_8);
-                        System.out.println("<- Received from WS: " + msg);
-                        ws.writeTextMessage("Server received your WS message: " + msg);
-                    });
+
 
 
                 })
                 // Vert.x 5.x listen 方法返回 Future，这里我们直接使用 onSuccess/onFailure
-                .listen(8080)
+                .listen(8383)
                 .onSuccess(server -> {
-                    System.out.println("WebSocket Server 正在监听端口 8080。");
+                    System.out.println("WebSocket Server 正在监听端口 8383。");
                 })
                 .onFailure(cause -> {
                     System.err.println("启动 WebSocket Server 失败: " + cause.getMessage());
@@ -331,14 +331,6 @@ public class Main extends AbstractVerticle {
     }
 
 
-
-    // --- 辅助方法 ---
-
-    /**
-     * 从 Cookie 头部字符串中提取 sessionid 的值。
-     * @param cookieHeader HTTP Cookie 头部内容
-     * @return Session ID 或 null
-     */
     private String extractSessionIdFromCookie(String cookieHeader) {
         if (cookieHeader == null) {
             return null;
@@ -346,9 +338,9 @@ public class Main extends AbstractVerticle {
         // 简单分隔，查找 sessionid=
         String[] cookies = cookieHeader.split("; ");
         for (String cookie : cookies) {
-            if (cookie.startsWith("sessionid=")) {
+            if (cookie.startsWith("SID=")) {
                 // 确保 sessionid 后面没有多余的 =
-                return cookie.substring("sessionid=".length());
+                return cookie.substring("SID=".length());
             }
         }
         return null;
@@ -357,13 +349,13 @@ public class Main extends AbstractVerticle {
     private void handleTargetedMessage(String jsonPayload) {
         try {
             JsonObject message = new JsonObject(jsonPayload);
-            String targetSessionId = message.getString("targetSessionId");
+            String userId = message.getString("userId");
             String data = message.getString("data");
 
-            if (targetSessionId != null && data != null) {
+            if (userId != null && data != null) {
 
                 // 关键修改：获取连接列表
-                List<ServerWebSocket> connections = userConnections.get(targetSessionId);
+                List<ServerWebSocket> connections = userConnections.get(userId);
 
                 if (connections != null && !connections.isEmpty()) {
                     int sentCount = 0;
@@ -379,20 +371,59 @@ public class Main extends AbstractVerticle {
                         }
                     }
 
-                    System.out.println("   [Redis Bridge] 成功发送消息到 Session ID: " + targetSessionId + "，连接数: " + sentCount);
+                    System.out.println("   [Redis Bridge] 成功发送消息到 Session ID: " + userId + "，连接数: " + sentCount);
 
-                    // 再次检查并清理空的 List
                     if (connections.isEmpty()) {
-                        userConnections.remove(targetSessionId);
+                        userConnections.remove(userId);
                     }
 
                 } else {
-                    System.out.println("   [Redis Bridge] 目标 Session ID 不在线或连接已关闭: " + targetSessionId);
+                    System.out.println("   [Redis Bridge] 目标 Session ID 不在线或连接已关闭: " + userId);
                 }
             }
         } catch (Exception e) {
-            System.err.println("❌ 解析 Redis 消息失败: " + e.getMessage() + ", Payload: " + jsonPayload);
+            System.err.println("解析 Redis 消息失败: " + e.getMessage() + ", Payload: " + jsonPayload);
         }
+    }
+
+
+
+    private Long parseId(String token36, String key) {
+
+        BigInteger number = new BigInteger(token36, 36);
+
+        String token16 = number.toString(16);
+
+        String sidHex = token16.substring(9, token16.length() - 8);
+        String sig = token16.substring(0, 9) + token16.substring(token16.length() - 8);
+
+        Long id = null;
+
+        try {
+            id = Long.parseLong(sidHex, 16);
+        } catch (NumberFormatException e) {
+            System.err.println("UIDService.parseId, NumberFormatException: " + token36);
+        }
+        if (id == null) {
+            return null;
+        }
+
+        String sig2 = "1" + blake2bDigest(String.valueOf(id) + key, 64);
+
+        if (!Objects.equals(sig, sig2)) {
+            return null;
+        }
+
+        return id;
+    }
+
+    private String blake2bDigest(String str, int digestSize) {
+        Blake2bDigest blake2bDigest = new Blake2bDigest(digestSize);
+        byte[] in = str.getBytes();
+        blake2bDigest.update(in, 0, in.length);
+        final byte[] out = new byte[blake2bDigest.getDigestSize()];
+        blake2bDigest.doFinal(out, 0);
+        return Hex.encodeHexString(out);
     }
 }
 
