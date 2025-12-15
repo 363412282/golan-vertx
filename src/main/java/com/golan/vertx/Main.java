@@ -18,12 +18,10 @@ import org.apache.commons.codec.binary.Hex;
 import org.bouncycastle.crypto.digests.Blake2bDigest;
 
 import java.math.BigInteger;
+import java.net.URLDecoder;
 import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
-import java.util.ArrayList;
-import java.util.List;
-import java.util.Map;
-import java.util.Objects;
+import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 
@@ -33,7 +31,7 @@ public class Main extends AbstractVerticle {
 
     private final Map<String, List<ServerWebSocket>> userConnections = new ConcurrentHashMap<>();
 
-    private static final String REDIS_CHANNEL = "/server/7";
+    private static final String REDIS_CHANNEL = "/server/ws:7";
 
     public static void main(String[] args) {
 
@@ -97,10 +95,8 @@ public class Main extends AbstractVerticle {
                 .webSocketHandler(ws -> {
                     System.out.println("-> WebSocket client connected: " + ws.remoteAddress());
 
-                    String cookieHeader = ws.headers().get("Cookie");
-                    String sessionToken = extractSessionIdFromCookie(cookieHeader);
-
-                    // ... (Session ID 和路径校验，保持不变) ...
+                    Map<String, String> params = parseQuery(ws.query());
+                    String sessionToken = params.get("token");
 
                     System.out.println("-> WebSocket connected, Session ID: " + sessionToken);
 
@@ -331,21 +327,6 @@ public class Main extends AbstractVerticle {
     }
 
 
-    private String extractSessionIdFromCookie(String cookieHeader) {
-        if (cookieHeader == null) {
-            return null;
-        }
-        // 简单分隔，查找 sessionid=
-        String[] cookies = cookieHeader.split("; ");
-        for (String cookie : cookies) {
-            if (cookie.startsWith("SID=")) {
-                // 确保 sessionid 后面没有多余的 =
-                return cookie.substring("SID=".length());
-            }
-        }
-        return null;
-    }
-
     private void handleTargetedMessage(String jsonPayload) {
         try {
             JsonObject message = new JsonObject(jsonPayload);
@@ -371,14 +352,14 @@ public class Main extends AbstractVerticle {
                         }
                     }
 
-                    System.out.println("   [Redis Bridge] 成功发送消息到 Session ID: " + userId + "，连接数: " + sentCount);
+                    System.out.println("   [Redis Bridge] 成功发送消息到 User ID: " + userId + "，连接数: " + sentCount);
 
                     if (connections.isEmpty()) {
                         userConnections.remove(userId);
                     }
 
                 } else {
-                    System.out.println("   [Redis Bridge] 目标 Session ID 不在线或连接已关闭: " + userId);
+                    System.out.println("   [Redis Bridge] 目标 User ID 不在线或连接已关闭: " + userId);
                 }
             }
         } catch (Exception e) {
@@ -390,31 +371,44 @@ public class Main extends AbstractVerticle {
 
     private Long parseId(String token36, String key) {
 
-        BigInteger number = new BigInteger(token36, 36);
-
-        String token16 = number.toString(16);
-
-        String sidHex = token16.substring(9, token16.length() - 8);
-        String sig = token16.substring(0, 9) + token16.substring(token16.length() - 8);
-
-        Long id = null;
-
         try {
-            id = Long.parseLong(sidHex, 16);
+            BigInteger number = new BigInteger(token36, 36);
+
+            String token16 = number.toString(16);
+
+            String sidHex = token16.substring(9, token16.length() - 8);
+            String sig = token16.substring(0, 9) + token16.substring(token16.length() - 8);
+
+            Long id = Long.parseLong(sidHex, 16);
+
+            String sig2 = "1" + blake2bDigest(id + key, 64);
+
+            if (!Objects.equals(sig, sig2)) {
+                return null;
+            }
+
+            return id;
+
         } catch (NumberFormatException e) {
             System.err.println("UIDService.parseId, NumberFormatException: " + token36);
-        }
-        if (id == null) {
+
             return null;
         }
+    }
 
-        String sig2 = "1" + blake2bDigest(String.valueOf(id) + key, 64);
+    private Map<String, String> parseQuery(String query) {
+        Map<String, String> params = new HashMap<>();
+        if (query == null || query.isEmpty()) return params;
 
-        if (!Objects.equals(sig, sig2)) {
-            return null;
+        for (String param : query.split("&")) {
+            String[] kv = param.split("=", 2);
+            if (kv.length == 2) {
+                String key = URLDecoder.decode(kv[0], StandardCharsets.UTF_8);
+                String value = URLDecoder.decode(kv[1], StandardCharsets.UTF_8);
+                params.put(key, value);
+            }
         }
-
-        return id;
+        return params;
     }
 
     private String blake2bDigest(String str, int digestSize) {
