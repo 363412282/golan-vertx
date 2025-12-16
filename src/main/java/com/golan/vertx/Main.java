@@ -148,7 +148,7 @@ public class Main extends AbstractVerticle {
                                     .build());
 
                             Request request = Request.cmd(Command.LPUSH)
-                                    .arg(Buffer.buffer(MQTT_QUEUE))
+                                    .arg(Buffer.buffer(WS_QUEUE))
                                     .arg(Buffer.buffer(messageBytes));
 
                             redis.send(request)
