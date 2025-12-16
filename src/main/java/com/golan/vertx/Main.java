@@ -35,6 +35,7 @@ public class Main extends AbstractVerticle {
 
 
     private static final String WS_CHANNEL = "/server/ws:7";
+    private static final String WS_QUEUE = "/user/ws:7";
     private static final String MQTT_CHANNEL = "/server/mqtt:7";
     private static final String MQTT_QUEUE = "/device/mqtt:7";
 
@@ -139,10 +140,24 @@ public class Main extends AbstractVerticle {
 
                         ws.handler(buffer -> {
                             String msg = buffer.toString(StandardCharsets.UTF_8);
+
+                            byte[] messageBytes = BinaryMessageCodec.encode(BinaryMessageCodec.Message.builder()
+                                    .payload(buffer.getBytes())
+                                    .fromType(1)
+                                    .from(userId)
+                                    .build());
+
+                            Request request = Request.cmd(Command.LPUSH)
+                                    .arg(Buffer.buffer(MQTT_QUEUE))
+                                    .arg(Buffer.buffer(messageBytes));
+
+                            redis.send(request)
+                                    .onSuccess(res -> System.out.println("[MQTT] Upstream Message To Queue: " + MQTT_QUEUE))
+                                    .onFailure(e -> System.err.println("[MQTT] Upstream Message Failed. " + e.getMessage()));
+
                             System.out.println("[WS] Message From User (" + userId + "): " + msg);
                         });
 
-                        // 4. 关闭时移除连接
                         ws.closeHandler(v -> {
                             List<ServerWebSocket> connections = userConnections.get(userId);
                             if (connections != null) {
@@ -220,8 +235,8 @@ public class Main extends AbstractVerticle {
                 byte[] messageBytes = BinaryMessageCodec.encode(BinaryMessageCodec.Message.builder()
                         .qos(qos.value())
                         .payload(payload)
-                        .receiver(topic)
-                        .receiverType(0)
+                        .from(clientId)
+                        .fromType(0)
                         .build());
 
                 Request request = Request.cmd(Command.LPUSH)
@@ -271,10 +286,10 @@ public class Main extends AbstractVerticle {
         try {
             BinaryMessageCodec.Message message = BinaryMessageCodec.decode(messageBytes);
 
-            if (message.getReceiver() != null && message.getPayload() != null) {
+            if (message.getTo() != null && message.getPayload() != null) {
 
                 // 关键修改：获取连接列表
-                List<ServerWebSocket> connections = userConnections.get(message.getReceiver());
+                List<ServerWebSocket> connections = userConnections.get(message.getTo());
 
                 if (connections != null && !connections.isEmpty()) {
                     int sentCount = 0;
@@ -291,14 +306,14 @@ public class Main extends AbstractVerticle {
                         }
                     }
 
-                    System.out.println("[WS] Handle Redis PUB/SUB Message. User ID (" + message.getReceiver() + ") Sent: " + sentCount);
+                    System.out.println("[WS] Handle Redis PUB/SUB Message. User ID (" + message.getTo() + ") Sent: " + sentCount);
 
                     if (connections.isEmpty()) {
-                        userConnections.remove(message.getReceiver());
+                        userConnections.remove(message.getTo());
                     }
 
                 } else {
-                    System.out.println("[WS] Handle Redis PUB/SUB Message Failed. Empty Connections. User ID (" + message.getReceiver() + ")");
+                    System.out.println("[WS] Handle Redis PUB/SUB Message Failed. Empty Connections. User ID (" + message.getTo() + ")");
                 }
             }
         } catch (Exception e) {
@@ -366,7 +381,7 @@ public class Main extends AbstractVerticle {
         try {
             BinaryMessageCodec.Message message = BinaryMessageCodec.decode(messageBytes);
 
-            String targetClientId = message.getReceiver();
+            String targetClientId = message.getTo();
             byte[] payload = message.getPayload();
             int qosLevel = message.getQos();
 
@@ -453,7 +468,7 @@ public class Main extends AbstractVerticle {
 
                         BinaryMessageCodec.Message message = BinaryMessageCodec.decode(messageBytes);
 
-                        String targetClientId = message.getReceiver();
+                        String targetClientId = message.getTo();
                         byte[] payload = message.getPayload();
                         int qosLevel = message.getQos();
 
