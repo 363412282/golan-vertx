@@ -1,6 +1,5 @@
 package com.golan.vertx;
 
-
 import lombok.AllArgsConstructor;
 import lombok.Builder;
 import lombok.Data;
@@ -10,74 +9,73 @@ import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 
 /**
- * 高性能、零异常风险的二进制消息编解码器
- * 核心设计：位图(Bitmap)标记可选字段，严格边界检查
+ * 高性能二进制消息编解码器 - 最终优化版
+ * 特点：零异常风险、支持可选字段、支持空 Payload 传输、严格边界检查
  */
 public class BinaryMessageCodec {
 
-    // 字段存在性位图常量
+    // 字段存在性位图常量 (使用单字节 flags，目前剩余 2 位可扩展)
     private static final byte HAS_TO_BIT       = (byte) 0b10000000;
     private static final byte HAS_FROM_BIT     = (byte) 0b01000000;
     private static final byte HAS_PAYLOAD_BIT  = (byte) 0b00100000;
     private static final byte HAS_ID_BIT       = (byte) 0b00010000;
-    private static final byte HAS_TO_TYPE_BIT   = (byte) 0b00001000;
-    private static final byte HAS_FROM_TYPE_BIT = (byte) 0b00000100;
-    private static final byte HAS_QOS_BIT      = (byte) 0b00000010;
+    private static final byte HAS_QOS_BIT      = (byte) 0b00001000;
+    private static final byte HAS_TOPIC_BIT    = (byte) 0b00000100;
 
-    // 安全限制：防止恶意数据导致内存溢出 (例如限制单个字段最大 10MB)
+    // 安全限制：防止坏数据导致 OOM (单个字段限制 10MB)
     private static final int MAX_FIELD_SIZE = 10 * 1024 * 1024;
 
     /**
-     * 编码：将 Message 对象转换为字节数组
-     * 即使 msg 为空或字段异常，也会安全处理
+     * 编码：将 Message 转换为字节数组
+     * 允许 msg 对象及其内部所有字段为 null
      */
     public static byte[] encode(Message msg) {
         if (msg == null) return new byte[0];
 
         try {
             byte flags = 0;
-            int varSize = 0;
+            int totalSize = 1; // 初始 1 字节用于 flags
 
-            // 1. 预处理并计算变长字段长度
-            byte[] idB = getBytes(msg.getId());
-            byte[] toB = getBytes(msg.getTo());
-            byte[] fromB = getBytes(msg.getFrom());
-            byte[] payB = msg.getPayload();
+            // 1. 预处理变长字段并计算总长度
+            byte[] idB    = getBytes(msg.getId());
+            byte[] toB    = getBytes(msg.getTo());
+            byte[] fromB  = getBytes(msg.getFrom());
+            byte[] topicB = getBytes(msg.getTopic());
+            byte[] payB   = msg.getPayload();
 
-            if (idB != null) { flags |= HAS_ID_BIT; varSize += 4 + idB.length; }
-            if (toB != null) { flags |= HAS_TO_BIT; varSize += 4 + toB.length; }
-            if (fromB != null) { flags |= HAS_FROM_BIT; varSize += 4 + fromB.length; }
-            if (payB != null) { flags |= HAS_PAYLOAD_BIT; varSize += 4 + payB.length; }
+            if (idB != null)    { flags |= HAS_ID_BIT;      totalSize += 4 + idB.length; }
+            if (toB != null)    { flags |= HAS_TO_BIT;      totalSize += 4 + toB.length; }
+            if (fromB != null)  { flags |= HAS_FROM_BIT;    totalSize += 4 + fromB.length; }
+            if (topicB != null) { flags |= HAS_TOPIC_BIT;   totalSize += 4 + topicB.length; }
+            if (payB != null)   { flags |= HAS_PAYLOAD_BIT; totalSize += 4 + payB.length; }
 
-            // 2. 处理可选的定长字段
-            if (msg.getToType() != null) { flags |= HAS_TO_TYPE_BIT; varSize += 4; }
-            if (msg.getFromType() != null) { flags |= HAS_FROM_TYPE_BIT; varSize += 4; }
-            if (msg.getQos() != null) { flags |= HAS_QOS_BIT; varSize += 4; }
+            // 2. 处理定长字段 (QoS)
+            if (msg.getQos() != null) { flags |= HAS_QOS_BIT; totalSize += 4; }
 
-            // 3. 分配内存并写入
-            ByteBuffer buffer = ByteBuffer.allocate(1 + varSize);
+            // 3. 写入数据
+            ByteBuffer buffer = ByteBuffer.allocate(totalSize);
             buffer.put(flags);
 
-            // 严格按照顺序写入
-            if ((flags & HAS_TO_TYPE_BIT) != 0) buffer.putInt(msg.getToType());
-            if ((flags & HAS_FROM_TYPE_BIT) != 0) buffer.putInt(msg.getFromType());
+            // 优先写入定长字段
             if ((flags & HAS_QOS_BIT) != 0) buffer.putInt(msg.getQos());
 
-            writeVarField(buffer, idB, (flags & HAS_ID_BIT) != 0);
-            writeVarField(buffer, toB, (flags & HAS_TO_BIT) != 0);
-            writeVarField(buffer, fromB, (flags & HAS_FROM_BIT) != 0);
-            writeVarField(buffer, payB, (flags & HAS_PAYLOAD_BIT) != 0);
+            // 按序写入变长字段
+            writeVarField(buffer, idB,    (flags & HAS_ID_BIT) != 0);
+            writeVarField(buffer, toB,    (flags & HAS_TO_BIT) != 0);
+            writeVarField(buffer, fromB,  (flags & HAS_FROM_BIT) != 0);
+            writeVarField(buffer, topicB, (flags & HAS_TOPIC_BIT) != 0);
+            writeVarField(buffer, payB,   (flags & HAS_PAYLOAD_BIT) != 0);
 
             return buffer.array();
         } catch (Exception e) {
-            // 理论上不会走到这里，除非 JVM 内存耗尽
+            // 兜底策略：发生任何非预期异常时返回空数组，不中断主流程
             return new byte[0];
         }
     }
 
     /**
      * 解码：将字节数组还原为 Message 对象
-     * 包含严格的边界检查，防止任何 BufferUnderflowException 或脏数据攻击
+     * 具备严格边界检查，能够处理截断数据
      */
     public static Message decode(byte[] data) {
         if (data == null || data.length < 1) return new Message();
@@ -87,32 +85,38 @@ public class BinaryMessageCodec {
             byte flags = buffer.get();
             Message msg = new Message();
 
-            // 1. 读取定长字段 (确保有足够的 4 字节空间)
-            if ((flags & HAS_TO_TYPE_BIT) != 0 && buffer.remaining() >= 4) msg.setToType(buffer.getInt());
-            if ((flags & HAS_FROM_TYPE_BIT) != 0 && buffer.remaining() >= 4) msg.setFromType(buffer.getInt());
-            if ((flags & HAS_QOS_BIT) != 0 && buffer.remaining() >= 4) msg.setQos(buffer.getInt());
+            // 1. 读取定长字段 (QoS)
+            if ((flags & HAS_QOS_BIT) != 0) {
+                if (buffer.remaining() >= 4) {
+                    msg.setQos(buffer.getInt());
+                } else {
+                    return msg; // 数据不全，提前返回已解析部分
+                }
+            }
 
-            // 2. 读取变长字段 (String)
-            msg.setId(readString(buffer, (flags & HAS_ID_BIT) != 0));
-            msg.setTo(readString(buffer, (flags & HAS_TO_BIT) != 0));
-            msg.setFrom(readString(buffer, (flags & HAS_FROM_BIT) != 0));
+            // 2. 依次读取变长字符串字段
+            msg.setId(readString(buffer,    (flags & HAS_ID_BIT) != 0));
+            msg.setTo(readString(buffer,    (flags & HAS_TO_BIT) != 0));
+            msg.setFrom(readString(buffer,  (flags & HAS_FROM_BIT) != 0));
+            msg.setTopic(readString(buffer, (flags & HAS_TOPIC_BIT) != 0));
 
-            // 3. 读取 Payload (byte[])
+            // 3. 读取二进制 Payload
             if ((flags & HAS_PAYLOAD_BIT) != 0) {
-                byte[] p = readRawBytes(buffer);
+                byte[] p = readRawBytes(buffer, true);
                 if (p != null) msg.setPayload(p);
             }
 
             return msg;
         } catch (Exception e) {
-            // 捕获所有潜在的解包异常，返回空对象而非抛出错误
+            // 解析失败时返回空对象，防止上游业务 NPE
             return new Message();
         }
     }
 
-    // --- 私有辅助方法：确保安全性 ---
+    // --- 私有工具方法 ---
 
     private static byte[] getBytes(String s) {
+        // null 或空字符串在传输时不占用空间
         return (s == null || s.isEmpty()) ? null : s.getBytes(StandardCharsets.UTF_8);
     }
 
@@ -128,19 +132,21 @@ public class BinaryMessageCodec {
         return (b == null) ? null : new String(b, StandardCharsets.UTF_8);
     }
 
-    private static byte[] readRawBytes(ByteBuffer buffer) {
-        return readRawBytes(buffer, true);
-    }
-
     private static byte[] readRawBytes(ByteBuffer buffer, boolean exists) {
-        if (!exists || buffer.remaining() < 4) return null;
+        if (!exists) return null;
+
+        // 边界检查：必须至少有 4 字节来读取长度
+        if (buffer.remaining() < 4) return null;
 
         int len = buffer.getInt();
 
-        // 防御性检查：长度必须为正，且不能超过缓冲区剩余大小，且不能超过安全上限
-        if (len <= 0 || len > buffer.remaining() || len > MAX_FIELD_SIZE) {
+        // 安全检查：长度不能为负，不能超过剩余缓冲区，不能超过 10MB 阈值
+        if (len < 0 || len > buffer.remaining() || len > MAX_FIELD_SIZE) {
             return null;
         }
+
+        // 处理空数组场景 (len == 0)
+        if (len == 0) return new byte[0];
 
         byte[] b = new byte[len];
         buffer.get(b);
@@ -152,12 +158,11 @@ public class BinaryMessageCodec {
     @AllArgsConstructor
     @NoArgsConstructor
     public static class Message {
-        private String id;
-        private String to;
-        private Integer toType;
-        private String from;
-        private Integer fromType;
-        private Integer qos;
-        private byte[] payload;
+        private String id;      // 消息唯一标识
+        private String to;      // 接收者
+        private String from;    // 发送者
+        private Integer qos;    // 服务质量
+        private String topic;   // 订阅主题
+        private byte[] payload; // 二进制载荷
     }
 }
