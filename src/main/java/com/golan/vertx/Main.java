@@ -408,7 +408,7 @@ public class Main extends AbstractVerticle {
                         }
                     }
 
-                    System.out.println("[WS] Handle Redis PUB/SUB Message. User ID (" + message.getTo() + ") Sent: " + sentCount);
+                    System.out.println("[WS] Handle Redis PUB/SUB Message. User ID (" + message.getTo() + ") Sent=" + sentCount);
 
                     if (connections.isEmpty()) {
                         userConnections.remove(message.getTo());
@@ -416,7 +416,7 @@ public class Main extends AbstractVerticle {
                 }
             }
         } catch (Exception e) {
-            System.err.println("[WS] Handle Redis PUB/SUB Message Error. " + e.getMessage() + ", Message Length: " + (messageBytes != null ? messageBytes.length : 0));
+            System.err.println("[WS] Handle Redis PUB/SUB Message Error. " + e.getMessage() + ", Length=" + (messageBytes != null ? messageBytes.length : 0));
         }
     }
 
