@@ -247,7 +247,7 @@ public class Main extends AbstractVerticle {
 
                             byte[] messageBytes = BinaryMessageCodec.encode(message);
 
-                            webClient.post(8080, "127.0.0.1", "/systemService/upstreamWS")
+                            webClient.post(8080, "127.0.0.1", "/system/upstream/ws")
                                     .putHeader("Content-Type", "application/octet-stream")
                                     .sendBuffer(Buffer.buffer(messageBytes))
                                     .onSuccess(res -> {
@@ -340,7 +340,7 @@ public class Main extends AbstractVerticle {
 
                 byte[] messageBytes = BinaryMessageCodec.encode(message);
 
-                webClient.post(8080, "127.0.0.1", "/systemService/upstreamMQTT")
+                webClient.post(8080, "127.0.0.1", "/system/upstream/mqtt")
                         .putHeader("Content-Type", "application/octet-stream")
                         .sendBuffer(Buffer.buffer(messageBytes))
                         .onSuccess(res -> {
