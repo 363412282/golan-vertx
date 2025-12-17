@@ -7,6 +7,7 @@ import io.vertx.core.http.HttpServer;
 import io.vertx.core.http.ServerWebSocket;
 import io.vertx.mqtt.MqttEndpoint;
 import io.vertx.mqtt.MqttServer;
+import io.vertx.mqtt.MqttServerOptions;
 import io.vertx.mqtt.MqttTopicSubscription;
 import io.vertx.redis.client.*;
 import org.apache.commons.codec.binary.Hex;
@@ -76,7 +77,7 @@ public class Main extends AbstractVerticle {
                                 message.setQos(MqttQoS.AT_MOST_ONCE.value());
                             }
 
-                            if (qosLevel != MqttQoS.AT_MOST_ONCE) {
+                            if (false && qosLevel != MqttQoS.AT_MOST_ONCE) {
                                 vertx.eventBus().publish(MQTT_CHANNEL, messageBytes);
                             } else {
 
@@ -280,6 +281,7 @@ public class Main extends AbstractVerticle {
     }
 
     private Future<MqttServer> startMqttServer() {
+
         MqttServer mqttServer = MqttServer.create(vertx);
 
         return mqttServer.endpointHandler(endpoint -> {
@@ -369,7 +371,8 @@ public class Main extends AbstractVerticle {
             // 7. 检查是否有离线消息并补发
             checkAndSendOfflineMessages(endpoint);
 
-        }).listen(1983)
+        })
+        .listen(1983)
         .onSuccess(s -> System.out.println("[MQTT] Server Started. Listen 1983"))
         .onFailure(e -> System.err.println("[MQTT] Server Start Failed. " + e.getMessage()));
     }
@@ -501,6 +504,8 @@ public class Main extends AbstractVerticle {
                 pendingAckMap.put(mapKey, redisMsgId);
                 System.out.println("[MQTT] QoS " + qos.value() + " Message Sent. PacketId=" + mqttPacketId + ", Topic=" + topic);
             }
+
+            System.out.println("[MQTT] QoS " + qos.value() + " Message Sent. PacketId=" + mqttPacketId + ", Topic=" + topic + ", Length=" + payload.length);
         })
         // 失败时执行 (onFailure 接收 Throwable 类型的 cause)
         .onFailure(cause -> {
@@ -518,28 +523,28 @@ public class Main extends AbstractVerticle {
             .onSuccess(response -> {
                 if (response == null || response.size() == 0) return;
 
-                System.out.println("[MQTT] Client (" + clientId + ") Offline Message Count: " + (response.size() / 2) + ". Start Send.");
+                System.out.println("[MQTT] Client (" + clientId + ") Offline Message Count: " + response.getKeys().size() + ". Start Send.");
 
-                for (int i = 0; i < response.size(); i += 2) {
-                    String redisMsgId = response.get(i).toString();
+                for (String redisMsgId : response.getKeys()) {
 
-                    try {
-                        byte[] messageBytes = response.get(i + 1).toBuffer().getBytes();
-
-                        BinaryMessageCodec.Message message = BinaryMessageCodec.decode(messageBytes);
-
-                        String targetClientId = message.getTo();
-                        byte[] payload = message.getPayload();
-                        int qosLevel = message.getQos();
-
-                        sendMqttMessage(endpoint, redisMsgId, payload, MqttQoS.valueOf(qosLevel));
-
-                    } catch (Exception e) {
-                        // 解析失败，立即删除坏数据
+                    Response value = response.get(redisMsgId);
+                    if (value == null) {
                         redisAPI.hdel(Arrays.asList("mqtt:msg:" + clientId, redisMsgId));
-
-                        System.err.println("[MQTT] Client (" + clientId + ") Offline Message Parse Failed And Delete. " + e.getMessage());
+                        continue;
                     }
+
+                    byte[] messageBytes = value.toBuffer().getBytes();
+                    BinaryMessageCodec.Message message = BinaryMessageCodec.decode(messageBytes);
+
+                    byte[] payload = message.getPayload();
+                    Integer qosLevel = message.getQos();
+
+                    if (qosLevel == null || payload == null) {
+                        redisAPI.hdel(Arrays.asList("mqtt:msg:" + clientId, redisMsgId));
+                        continue;
+                    }
+
+                    sendMqttMessage(endpoint, redisMsgId, payload, MqttQoS.valueOf(qosLevel));
                 }
             })
             .onFailure(e -> System.err.println("[MQTT] Client (" + clientId + ") Offline Message Fetch Error. " + e.getMessage()));
