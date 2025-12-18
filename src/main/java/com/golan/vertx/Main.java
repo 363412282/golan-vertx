@@ -508,7 +508,7 @@ public class Main extends AbstractVerticle {
 
         if (qos == MqttQoS.EXACTLY_ONCE || qos == MqttQoS.AT_LEAST_ONCE) {
 
-            redisAPI.set(Arrays.asList("mqtt:lock:" + redisMsgId, "1", "NX", "EX", "60"))
+            redisAPI.set(Arrays.asList("mqtt:lock:" + redisMsgId, "1", "NX", "EX", "15"))
                 .onSuccess(res -> {
                     if (res != null && "OK".equals(res.toString())) {
                         endpoint.publish(
