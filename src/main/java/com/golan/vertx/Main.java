@@ -90,10 +90,41 @@ public class Main extends AbstractVerticle {
 
                         } else if (MQTT_CHANNEL.equals(channel)) {
 
-                            String to = BinaryMessageCodec.decodeTo(messageBytes);
+                            BinaryMessageCodec.Message message = BinaryMessageCodec.decode(messageBytes);
 
-                            if (to != null) {
-                                vertx.eventBus().send("/mqtt/client/" + to, messageBytes);
+                            if (message.getId() == null || message.getId().isEmpty()
+                                || message.getTopic() == null || message.getTopic().isEmpty()
+                                || message.getTo() == null || message.getTo().isEmpty()
+                                || message.getPayload() == null) {
+                                return;
+                            }
+
+                            if (message.getQos() == null) {
+                                message.setQos(MqttQoS.AT_MOST_ONCE.value());
+                            }
+
+                            if (message.getQos().equals(MqttQoS.EXACTLY_ONCE.value()) || message.getQos().equals(MqttQoS.AT_LEAST_ONCE.value()) )  {
+
+                                String redisKey = "mqtt:msg:" + message.getTo();
+
+                                List<Request> batch = new ArrayList<>();
+                                batch.add(Request.cmd(Command.HSET)
+                                        .arg(Buffer.buffer(redisKey))
+                                        .arg(Buffer.buffer(message.getId()))
+                                        .arg(Buffer.buffer(messageBytes)));
+                                batch.add(Request.cmd(Command.EXPIRE)
+                                        .arg(Buffer.buffer(redisKey))
+                                        .arg(Buffer.buffer(String.valueOf(3600 * 36))));
+
+                                redis.batch(batch)
+                                    .onSuccess(res -> {
+                                        vertx.eventBus().send("/mqtt/client/" + message.getTo(), messageBytes);
+                                    })
+                                    .onFailure(e -> log.error("[MQTT] QoS {} Message Persisted Failed: Client ID ({})", message.getQos(), message.getTo()));
+
+                            } else if (message.getQos().equals(MqttQoS.AT_MOST_ONCE.value())) {
+
+                                vertx.eventBus().send("/mqtt/client/" + message.getTo(), messageBytes);
                             }
                         }
                     }
@@ -358,6 +389,11 @@ public class Main extends AbstractVerticle {
 
 
     private void handleWSMessage(ServerWebSocket ws, byte[] messageBytes) {
+
+        if (ws == null) {
+            return;
+        }
+
         try {
             BinaryMessageCodec.Message message = BinaryMessageCodec.decode(messageBytes);
 
@@ -443,58 +479,16 @@ public class Main extends AbstractVerticle {
     
     private void handleMQTTMessage(MqttEndpoint endpoint, byte[] messageBytes) {
 
+        if (endpoint == null) {
+            return;
+        }
+
         try {
 
             BinaryMessageCodec.Message message = BinaryMessageCodec.decode(messageBytes);
 
-            if (message.getId() == null || message.getId().isEmpty()
-                    || message.getTopic() == null || message.getTopic().isEmpty()
-                    || message.getTo() == null || message.getTo().isEmpty()
-                    || message.getPayload() == null) {
-                return;
-            }
+            sendMqttMessage(endpoint, message.getId(), message.getTopic(), message.getPayload(), MqttQoS.valueOf(message.getQos()));
 
-            if (message.getQos() == null) {
-                message.setQos(MqttQoS.AT_MOST_ONCE.value());
-            }
-
-            byte[] payload = message.getPayload();
-            Integer qosLevel = message.getQos();
-            String redisMsgId = message.getId();
-            String topic = message.getTopic();
-
-            if (message.getQos().equals(MqttQoS.EXACTLY_ONCE.value()) || message.getQos().equals(MqttQoS.AT_LEAST_ONCE.value()) )  {
-
-                String redisKey = "mqtt:msg:" + message.getTo();
-
-                List<Request> batch = new ArrayList<>();
-                batch.add(Request.cmd(Command.HSET)
-                        .arg(Buffer.buffer(redisKey))
-                        .arg(Buffer.buffer(message.getId()))
-                        .arg(Buffer.buffer(messageBytes)));
-                batch.add(Request.cmd(Command.EXPIRE)
-                        .arg(Buffer.buffer(redisKey))
-                        .arg(Buffer.buffer(String.valueOf(3600 * 36))));
-                batch.add(Request.cmd(Command.HLEN)
-                        .arg(Buffer.buffer(redisKey)));
-
-                redis.batch(batch)
-                    .onSuccess(res -> {
-
-                        sendMqttMessage(endpoint, redisMsgId, topic, payload, MqttQoS.valueOf(qosLevel));
-
-                        Response hLenRes = res.get(2);
-                        long messageCount = (hLenRes != null) ? hLenRes.toLong() : 0L;
-                        if (messageCount >= 7) {
-                            log.error("[MQTT] Client ({}) Has {} Offline Messages", message.getTo(), messageCount);
-                        }
-                    })
-                    .onFailure(e -> log.error("[MQTT] QoS {} Message Persisted Failed: Client ID ({})", message.getQos(), message.getTo()));
-
-            } else if (message.getQos().equals(MqttQoS.AT_MOST_ONCE.value())) {
-
-                sendMqttMessage(endpoint, redisMsgId, topic, payload, MqttQoS.valueOf(qosLevel));
-            }
         } catch (Exception e) {
             log.error("[MQTT] Handle MQTT Message Error: {}, Length={}", e.getMessage(), (messageBytes != null ? messageBytes.length : 0));
         }
