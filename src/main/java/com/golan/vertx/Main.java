@@ -3,15 +3,14 @@ package com.golan.vertx;
 import io.netty.handler.codec.mqtt.MqttQoS;
 import io.vertx.core.*;
 import io.vertx.core.buffer.Buffer;
+import io.vertx.core.eventbus.MessageConsumer;
 import io.vertx.core.http.HttpServer;
 import io.vertx.core.http.ServerWebSocket;
 import io.vertx.ext.web.client.WebClient;
-import io.vertx.ext.web.client.WebClientOptions;
 import io.vertx.mqtt.MqttEndpoint;
 import io.vertx.mqtt.MqttServer;
 import io.vertx.mqtt.MqttTopicSubscription;
 import io.vertx.redis.client.*;
-import org.apache.commons.codec.binary.Hex;
 import org.bouncycastle.crypto.digests.Blake2bDigest;
 
 import java.math.BigInteger;
@@ -39,12 +38,34 @@ public class Main extends AbstractVerticle {
     private static final String MQTT_CHANNEL = "/server/mqtt";
 
 
+
+
+    public static void main(String[] args) {
+
+        int instances = Runtime.getRuntime().availableProcessors();
+
+        Vertx vertx = Vertx.vertx();
+
+        DeploymentOptions mainOptions = new DeploymentOptions().setInstances(instances);
+
+        DeploymentOptions redisOptions = new DeploymentOptions().setInstances(1);
+
+        Future.all(
+                vertx.deployVerticle(Main.class.getName(), mainOptions),
+                vertx.deployVerticle(Main.RedisListenerVerticle.class.getName(), redisOptions)
+        ).onFailure(cause -> {
+            System.err.println("Vertx Deploy Failed: " + cause.getMessage());
+        });
+    }
+
+
+
+
+
     public static class RedisListenerVerticle extends AbstractVerticle {
 
         @Override
         public void start(Promise<Void> startPromise) {
-
-            SnowflakeId snowflakeId = snowflakeId(7L, 31L);
 
             RedisOptions config = new RedisOptions().setConnectionString("redis://127.0.0.1:6379");
             Redis redis = Redis.createClient(vertx, config);
@@ -58,55 +79,18 @@ public class Main extends AbstractVerticle {
 
                         if (WS_CHANNEL.equals(channel)) {
 
-                            vertx.eventBus().publish(WS_CHANNEL, messageBytes);
+                            String to = BinaryMessageCodec.decodeTo(messageBytes);
+
+                            if (to != null) {
+                                vertx.eventBus().send("/ws/user/" + to, messageBytes);
+                            }
 
                         } else if (MQTT_CHANNEL.equals(channel)) {
 
-                            BinaryMessageCodec.Message message = BinaryMessageCodec.decode(messageBytes);
+                            String to = BinaryMessageCodec.decodeTo(messageBytes);
 
-                            if (message.getTo() == null || message.getTo().isEmpty() || message.getPayload() == null) {
-                                return;
-                            }
-
-                            if (message.getQos() == null) {
-                                message.setQos(MqttQoS.AT_MOST_ONCE.value());
-                            }
-
-                            if (message.getQos().equals(MqttQoS.EXACTLY_ONCE.value()) || message.getQos().equals(MqttQoS.AT_LEAST_ONCE.value()) )  {
-
-                                String redisMsgId = Long.toString(snowflakeId.nextId(), 36);
-
-                                message.setId(redisMsgId);
-
-                                String redisKey = "mqtt:msg:" + message.getTo();
-
-                                List<Request> batch = new ArrayList<>();
-                                batch.add(Request.cmd(Command.HSET)
-                                    .arg(Buffer.buffer(redisKey))
-                                    .arg(Buffer.buffer(redisMsgId))
-                                    .arg(Buffer.buffer(messageBytes)));
-                                batch.add(Request.cmd(Command.EXPIRE)
-                                        .arg(Buffer.buffer(redisKey))
-                                        .arg(Buffer.buffer("86400")));
-                                batch.add(Request.cmd(Command.HLEN)
-                                        .arg(Buffer.buffer(redisKey)));
-
-                                redis.batch(batch)
-                                    .onSuccess(res -> {
-
-                                        vertx.eventBus().publish(MQTT_CHANNEL, BinaryMessageCodec.encode(message));
-
-                                        Response hLenRes = res.get(2);
-                                        long messageCount = (hLenRes != null) ? hLenRes.toLong() : 0L;
-                                        if (messageCount >= 7) {
-                                            System.err.println("[MQTT] Client " + message.getTo() + " has " + messageCount + " offline messages!");
-                                        }
-                                    })
-                                    .onFailure(e -> System.err.println("[MQTT] QoS " + message.getQos() + " Message Persisted Failed: Client ID (" + message.getTo() + ")"));
-
-                            } else {
-
-                                vertx.eventBus().publish(MQTT_CHANNEL, messageBytes);
+                            if (to != null) {
+                                vertx.eventBus().send("/mqtt/client/" + to, messageBytes);
                             }
                         }
                     }
@@ -121,18 +105,6 @@ public class Main extends AbstractVerticle {
                         });
             });
         }
-
-        private SnowflakeId snowflakeId(long dataCenterId, long machineId) {
-
-            long epoch = 1737784400000L;
-
-            int timestampBits = 44;
-            int machineBits = 7;
-            int dataCenterBits = 3;
-            int sequenceBits = 9;
-
-            return new SnowflakeId(epoch, timestampBits, machineBits, dataCenterBits, sequenceBits, dataCenterId, machineId);
-        }
     }
 
 
@@ -146,24 +118,6 @@ public class Main extends AbstractVerticle {
 
 
 
-
-    public static void main(String[] args) {
-
-        int instances = Runtime.getRuntime().availableProcessors();
-
-        Vertx vertx = Vertx.vertx();
-
-        DeploymentOptions mainOptions = new DeploymentOptions().setInstances(instances);
-
-        DeploymentOptions redisOptions = new DeploymentOptions().setInstances(1);
-
-        Future.all(
-            vertx.deployVerticle(Main.class.getName(), mainOptions),
-            vertx.deployVerticle(Main.RedisListenerVerticle.class.getName(), redisOptions)
-        ).onFailure(cause -> {
-            System.err.println("Vertx Deploy Failed: " + cause.getMessage());
-        });
-    }
 
     @Override
     public void start(Promise<Void> startPromise) {
@@ -181,23 +135,11 @@ public class Main extends AbstractVerticle {
             startMqttServer(),
             startWebSocketServer()
         ).onSuccess(v -> {
-            registerEventBusConsumers();
             startPromise.complete();
             System.out.println("ALL Services Started (MQTT: 1983, WS: 8383, Redis Listener: " + MQTT_CHANNEL + ", " + WS_CHANNEL + ")");
         }).onFailure(cause -> {
             startPromise.fail(cause);
             System.err.println("Services Start failed.: " + cause.getMessage());
-        });
-    }
-
-    private void registerEventBusConsumers() {
-        vertx.eventBus().consumer(WS_CHANNEL, event -> {
-            byte[] messageBytes = (byte[]) event.body();
-            handleSubWSMessage(messageBytes);
-        });
-        vertx.eventBus().consumer(MQTT_CHANNEL, event -> {
-            byte[] messageBytes = (byte[]) event.body();
-            handleSubMQTTMessage(messageBytes);
         });
     }
 
@@ -232,12 +174,33 @@ public class Main extends AbstractVerticle {
                     }
                     if (tempUserId != null && !tempUserId.isEmpty()) {
 
-                        final String userId = tempUserId;
+                        // 1. 注册用户连接
 
-                        userConnections.computeIfAbsent(userId, k -> new CopyOnWriteArrayList<>()).add(ws);
+                        final String userId = tempUserId;
 
                         System.out.println("[WS] Session Authenticated. User ID: " + userId);
 
+                        userConnections.computeIfAbsent(userId, k -> new CopyOnWriteArrayList<>()).add(ws);
+
+                        MessageConsumer<byte[]> consumer = vertx.eventBus().consumer("/ws/user/" + userId, msg -> {
+                            byte[] messageBytes = (byte[]) msg.body();
+                            handleSubWSMessage(ws, messageBytes);
+                        });
+
+                        // 2. 连接断开处理
+                        ws.closeHandler(v -> {
+                            consumer.unregister();
+                            List<ServerWebSocket> connections = userConnections.get(userId);
+                            if (connections != null) {
+                                connections.remove(ws);
+                                if (connections.isEmpty()) {
+                                    userConnections.remove(userId);
+                                }
+                            }
+                            System.out.println("[WS] Close Handler. Connection Removed. User ID: " + userId);
+                        });
+
+                        // 3. 处理客户端的消息
                         ws.handler(buffer -> {
 
                             BinaryMessageCodec.Message message = BinaryMessageCodec.Message.builder()
@@ -258,16 +221,7 @@ public class Main extends AbstractVerticle {
                                     });
                         });
 
-                        ws.closeHandler(v -> {
-                            List<ServerWebSocket> connections = userConnections.get(userId);
-                            if (connections != null) {
-                                connections.remove(ws);
-                                if (connections.isEmpty()) {
-                                    userConnections.remove(userId);
-                                }
-                            }
-                            System.out.println("[WS] Close Handler. Connection Removed. User ID: " + userId);
-                        });
+
                     } else {
                         System.out.println("[WS] Session Auth Failed. Session Token: " + sessionToken + ", Session ID: " + sid);
                         ws.close();
@@ -297,11 +251,27 @@ public class Main extends AbstractVerticle {
             System.out.println("[MQTT] Client Connected: " + clientId);
 
             // 1. 注册会话
-            clientConnections.put(clientId, endpoint);
+            MqttEndpoint old =clientConnections.put(clientId, endpoint);
+            if (old != null) {
+                old.close();
+            }
+
+            MessageConsumer<byte[]> consumer = vertx.eventBus().consumer("/mqtt/client/" + clientId, msg -> {
+                byte[] messageBytes = (byte[]) msg.body();
+                handleSubMQTTMessage(endpoint, messageBytes);
+            });
 
             // 2. 连接断开处理
-            endpoint.disconnectHandler(v -> handleDisconnect(clientId));
-            endpoint.closeHandler(v -> handleDisconnect(clientId));
+            endpoint.disconnectHandler(v -> {
+                consumer.unregister();
+                clientConnections.remove(clientId);
+                System.out.println("[MQTT] Remove Client (" + clientId + ") From Connections.");
+            });
+            endpoint.closeHandler(v -> {
+                consumer.unregister();
+                clientConnections.remove(clientId);
+                System.out.println("[MQTT] Remove Client (" + clientId + ") From Connections.");
+            });
 
             // 3. 处理客户端的订阅请求 (修复 MqttSubAckReasonCode 问题)
             endpoint.subscribeHandler(subscribe -> {
@@ -356,7 +326,7 @@ public class Main extends AbstractVerticle {
                 System.out.println("[MQTT] Receive QoS 2 PUBREL, Response PUBCOMP");
             });
 
-            // 4. 处理 QoS 1 ACK (PUBACK)
+            // 4. 处理 QoS 1 ACK (PUBACK) -> 服务器从 Redis 删除备份
             endpoint.publishAcknowledgeHandler(packetId -> {
                 confirmAndRemoveFromRedis(clientId, packetId, "QoS 1 (PUBACK)");
             });
@@ -387,34 +357,29 @@ public class Main extends AbstractVerticle {
     }
 
 
-    private void handleSubWSMessage(byte[] messageBytes) {
+    private void handleSubWSMessage(ServerWebSocket ws, byte[] messageBytes) {
         try {
             BinaryMessageCodec.Message message = BinaryMessageCodec.decode(messageBytes);
 
-            if (message.getTo() != null && message.getPayload() != null) {
+            if (message.getTo() == null || message.getTo().isEmpty() || message.getPayload() == null) {
+                return;
+            }
 
-                List<ServerWebSocket> connections = userConnections.get(message.getTo());
+            if (!ws.isClosed()) {
+                ws.writeTextMessage(new String(message.getPayload(), StandardCharsets.UTF_8));
+                // ws.writeBinaryMessage(Buffer.buffer(message.getPayload()));
 
-                if (connections != null && !connections.isEmpty()) {
-                    int sentCount = 0;
+                System.out.println("[WS] Message Sent. User=" + message.getTo() + ", Length=" + message.getPayload().length);
 
-                    for (ServerWebSocket ws : connections) {
-                        if (!ws.isClosed()) {
-                            ws.writeTextMessage(new String(message.getPayload(), StandardCharsets.UTF_8));
-                            // ws.writeBinaryMessage(Buffer.buffer(message.getPayload()));
-                            sentCount++;
-                        } else {
-                            connections.remove(ws);
-                        }
-                    }
-
-                    System.out.println("[WS] Handle Redis PUB/SUB Message. User ID (" + message.getTo() + ") Sent=" + sentCount);
-
-                    if (connections.isEmpty()) {
-                        userConnections.remove(message.getTo());
-                    }
+            } else {
+                String userId = message.getTo();
+                List<ServerWebSocket> connections = userConnections.get(userId);
+                connections.remove(ws);
+                if (connections.isEmpty()) {
+                    userConnections.remove(userId);
                 }
             }
+
         } catch (Exception e) {
             System.err.println("[WS] Handle Redis PUB/SUB Message Error. " + e.getMessage() + ", Length=" + (messageBytes != null ? messageBytes.length : 0));
         }
@@ -467,7 +432,7 @@ public class Main extends AbstractVerticle {
         blake2bDigest.update(in, 0, in.length);
         final byte[] out = new byte[blake2bDigest.getDigestSize()];
         blake2bDigest.doFinal(out, 0);
-        return Hex.encodeHexString(out);
+        return HexFormat.of().formatHex(out);
     }
 
 
@@ -476,49 +441,111 @@ public class Main extends AbstractVerticle {
 
 
     
-    private void handleSubMQTTMessage(byte[] messageBytes) {
-        try {
-            BinaryMessageCodec.Message message = BinaryMessageCodec.decode(messageBytes);
+    private void handleSubMQTTMessage(MqttEndpoint endpoint, byte[] messageBytes) {
 
-            String targetClientId = message.getTo();
-            byte[] payload = message.getPayload();
-            Integer qosLevel = message.getQos();
-            String redisMsgId = message.getId();
-            String topic = message.getTopic();
+        BinaryMessageCodec.Message message = BinaryMessageCodec.decode(messageBytes);
 
-            MqttEndpoint endpoint = clientConnections.get(targetClientId);
+        if (message.getId() == null || message.getId().isEmpty()
+                || message.getTopic() == null || message.getTopic().isEmpty()
+                || message.getTo() == null || message.getTo().isEmpty()
+                || message.getPayload() == null) {
+            return;
+        }
 
-            if (endpoint != null && endpoint.isConnected()) {
-                sendMqttMessage(endpoint, redisMsgId, topic, payload, MqttQoS.valueOf(qosLevel));
-            }
-        } catch (Exception e) {
-            System.err.println("[MQTT] Handle Redis PUB/SUB Message Error. " + e.getMessage() + ", Message Length: " + (messageBytes != null ? messageBytes.length : 0));
+        if (message.getQos() == null) {
+            message.setQos(MqttQoS.AT_MOST_ONCE.value());
+        }
+
+        byte[] payload = message.getPayload();
+        Integer qosLevel = message.getQos();
+        String redisMsgId = message.getId();
+        String topic = message.getTopic();
+
+        if (message.getQos().equals(MqttQoS.EXACTLY_ONCE.value()) || message.getQos().equals(MqttQoS.AT_LEAST_ONCE.value()) )  {
+
+            String redisKey = "mqtt:msg:" + message.getTo();
+
+            List<Request> batch = new ArrayList<>();
+            batch.add(Request.cmd(Command.HSET)
+                    .arg(Buffer.buffer(redisKey))
+                    .arg(Buffer.buffer(message.getId()))
+                    .arg(Buffer.buffer(messageBytes)));
+            batch.add(Request.cmd(Command.EXPIRE)
+                    .arg(Buffer.buffer(redisKey))
+                    .arg(Buffer.buffer(String.valueOf(3600 * 36))));
+            batch.add(Request.cmd(Command.HLEN)
+                    .arg(Buffer.buffer(redisKey)));
+
+            redis.batch(batch)
+                .onSuccess(res -> {
+
+                    sendMqttMessage(endpoint, redisMsgId, topic, payload, MqttQoS.valueOf(qosLevel));
+
+                    Response hLenRes = res.get(2);
+                    long messageCount = (hLenRes != null) ? hLenRes.toLong() : 0L;
+                    if (messageCount >= 7) {
+                        System.err.println("[MQTT] Client " + message.getTo() + " has " + messageCount + " offline messages!");
+                    }
+                })
+                .onFailure(e -> System.err.println("[MQTT] QoS " + message.getQos() + " Message Persisted Failed: Client ID (" + message.getTo() + ")"));
+
+        } else if (message.getQos().equals(MqttQoS.AT_MOST_ONCE.value())) {
+
+            sendMqttMessage(endpoint, redisMsgId, topic, payload, MqttQoS.valueOf(qosLevel));
         }
     }
 
     private void sendMqttMessage(MqttEndpoint endpoint, String redisMsgId, String topic, byte[] payload, MqttQoS qos) {
 
-        endpoint.publish(
-            topic,
-            Buffer.buffer(payload),
-            qos,
-            false,
-            false
-        )
-        // 成功时执行 (onSuccess 接收 Integer 类型的 mqttPacketId)
-        .onSuccess(mqttPacketId -> {
-            if (qos != MqttQoS.AT_MOST_ONCE && redisMsgId != null) {
-                String mapKey = getMapKey(endpoint.clientIdentifier(), mqttPacketId);
-                pendingAckMap.put(mapKey, redisMsgId);
-            }
+        if (endpoint == null || !endpoint.isConnected()) {
+            return;
+        }
 
-            System.out.println("[MQTT] QoS " + qos.value() + " Message Sent. PacketId=" + mqttPacketId + ", Topic=" + topic + ", Length=" + payload.length);
-        })
-        // 失败时执行 (onFailure 接收 Throwable 类型的 cause)
-        .onFailure(cause -> {
-            // 如果发送失败，消息仍在 Redis 中，等待客户端重连
-            System.err.println("[MQTT] QoS " + qos.value() + " Message Send Failed. Topic=" + topic + ". " + cause.getMessage());
-        });
+        if (qos == MqttQoS.EXACTLY_ONCE || qos == MqttQoS.AT_LEAST_ONCE) {
+
+            redisAPI.set(Arrays.asList("mqtt:lock:" + redisMsgId, "1", "NX", "EX", "60"))
+                .onSuccess(res -> {
+                    if (res != null && "OK".equals(res.toString())) {
+                        endpoint.publish(
+                            topic,
+                            Buffer.buffer(payload),
+                            qos,
+                            false,
+                            false
+                        )
+                        // 成功时执行 (onSuccess 接收 Integer 类型的 mqttPacketId)
+                        .onSuccess(mqttPacketId -> {
+                            if (redisMsgId != null) {
+                                String mapKey = getMapKey(endpoint.clientIdentifier(), mqttPacketId);
+                                pendingAckMap.put(mapKey, redisMsgId);
+                            }
+                            System.out.println("[MQTT] QoS " + qos.value() + " Message Sent. PacketId=" + mqttPacketId + ", Topic=" + topic + ", Length=" + payload.length);
+                        })
+                        // 失败时执行 (onFailure 接收 Throwable 类型的 cause)
+                        .onFailure(cause -> {
+                            // 如果发送失败，消息仍在 Redis 中，等待客户端重连
+                            System.err.println("[MQTT] QoS " + qos.value() + " Message Send Failed. Topic=" + topic + ". " + cause.getMessage());
+                        });
+                    } else {
+                        System.err.println("[MQTT] QoS " + qos.value() + " Message Lock Failed. Topic=" + topic + ", Id=" + redisMsgId);
+                    }
+                });
+
+        } else if (qos == MqttQoS.AT_MOST_ONCE ) {
+            endpoint.publish(
+                topic,
+                Buffer.buffer(payload),
+                qos,
+                false,
+                false
+            )
+            .onSuccess(mqttPacketId -> {
+                System.out.println("[MQTT] QoS " + qos.value() + " Message Sent. PacketId=" + mqttPacketId + ", Topic=" + topic + ", Length=" + payload.length);
+            })
+            .onFailure(cause -> {
+                System.err.println("[MQTT] QoS " + qos.value() + " Message Send Failed. Topic=" + topic + ". " + cause.getMessage());
+            });
+        }
     }
 
     private void checkAndSendOfflineMessages(MqttEndpoint endpoint) {
@@ -572,11 +599,6 @@ public class Main extends AbstractVerticle {
         } else {
             System.out.println("[MQTT] ACK [" + context + "] And Redis Message ID Not In Pending Ack Map. Client=" + clientId + ", PacketId=" + packetId);
         }
-    }
-
-    private void handleDisconnect(String clientId) {
-        clientConnections.remove(clientId);
-        System.out.println("[MQTT] Remove Client (" + clientId + ") From Connections.");
     }
 
     private String getMapKey(String clientId, int packetId) {

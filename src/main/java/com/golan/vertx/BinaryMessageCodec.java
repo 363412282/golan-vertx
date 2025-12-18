@@ -113,6 +113,50 @@ public class BinaryMessageCodec {
         }
     }
 
+    /**
+     * 极致性能优化：仅解析目标地址 (to)，用于路由决策。
+     * 相比全解析，它避免了 Message 对象的创建、Payload 的复制以及其他 String 的解码。
+     */
+    public static String decodeTo(byte[] data) {
+        if (data == null || data.length < 1) return null;
+
+        // 1. 获取标志位，如果连 TO 标志都没有，直接返回
+        byte flags = data[0];
+        if ((flags & HAS_TO_BIT) == 0) return null;
+
+        try {
+            ByteBuffer buffer = ByteBuffer.wrap(data);
+            buffer.get(); // 跳过 flags 字节 (position = 1)
+
+            // 2. 跳过 QoS (定长 4 字节)
+            if ((flags & HAS_QOS_BIT) != 0) {
+                if (buffer.remaining() < 4) return null;
+                buffer.position(buffer.position() + 4);
+            }
+
+            // 3. 跳过 ID (变长字段)
+            if ((flags & HAS_ID_BIT) != 0) {
+                if (buffer.remaining() < 4) return null;
+                int idLen = buffer.getInt();
+                if (idLen < 0 || idLen > buffer.remaining()) return null;
+                buffer.position(buffer.position() + idLen); // 直接移动指针，不读取内容
+            }
+
+            // 4. 读取 TO (目标字段)
+            if (buffer.remaining() < 4) return null;
+            int toLen = buffer.getInt();
+            if (toLen <= 0 || toLen > buffer.remaining() || toLen > MAX_FIELD_SIZE) return null;
+
+            // 只有这里才会真正发生内存分配和字符编码转换
+            byte[] toBytes = new byte[toLen];
+            buffer.get(toBytes);
+            return new String(toBytes, StandardCharsets.UTF_8);
+
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
     // --- 私有工具方法 ---
 
     private static byte[] getBytes(String s) {
