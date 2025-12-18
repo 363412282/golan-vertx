@@ -183,8 +183,7 @@ public class Main extends AbstractVerticle {
                         userConnections.computeIfAbsent(userId, k -> new CopyOnWriteArrayList<>()).add(ws);
 
                         MessageConsumer<byte[]> consumer = vertx.eventBus().consumer("/ws/user/" + userId, msg -> {
-                            byte[] messageBytes = (byte[]) msg.body();
-                            handleSubWSMessage(ws, messageBytes);
+                            handleWSMessage(ws, msg.body());
                         });
 
                         // 2. 连接断开处理
@@ -257,8 +256,7 @@ public class Main extends AbstractVerticle {
             }
 
             MessageConsumer<byte[]> consumer = vertx.eventBus().consumer("/mqtt/client/" + clientId, msg -> {
-                byte[] messageBytes = (byte[]) msg.body();
-                handleSubMQTTMessage(endpoint, messageBytes);
+                handleMQTTMessage(endpoint, msg.body());
             });
 
             // 2. 连接断开处理
@@ -357,7 +355,7 @@ public class Main extends AbstractVerticle {
     }
 
 
-    private void handleSubWSMessage(ServerWebSocket ws, byte[] messageBytes) {
+    private void handleWSMessage(ServerWebSocket ws, byte[] messageBytes) {
         try {
             BinaryMessageCodec.Message message = BinaryMessageCodec.decode(messageBytes);
 
@@ -441,7 +439,7 @@ public class Main extends AbstractVerticle {
 
 
     
-    private void handleSubMQTTMessage(MqttEndpoint endpoint, byte[] messageBytes) {
+    private void handleMQTTMessage(MqttEndpoint endpoint, byte[] messageBytes) {
 
         BinaryMessageCodec.Message message = BinaryMessageCodec.decode(messageBytes);
 
