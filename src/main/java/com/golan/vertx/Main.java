@@ -11,6 +11,7 @@ import io.vertx.mqtt.MqttEndpoint;
 import io.vertx.mqtt.MqttServer;
 import io.vertx.mqtt.MqttTopicSubscription;
 import io.vertx.redis.client.*;
+import lombok.extern.slf4j.Slf4j;
 import org.bouncycastle.crypto.digests.Blake2bDigest;
 
 import java.math.BigInteger;
@@ -21,6 +22,8 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.stream.Collectors;
 
+
+@Slf4j
 public class Main extends AbstractVerticle {
 
     private RedisAPI redisAPI;
@@ -51,17 +54,17 @@ public class Main extends AbstractVerticle {
         DeploymentOptions redisOptions = new DeploymentOptions().setInstances(1);
 
         Future.all(
-                vertx.deployVerticle(Main.class.getName(), mainOptions),
-                vertx.deployVerticle(Main.RedisListenerVerticle.class.getName(), redisOptions)
+            vertx.deployVerticle(Main.class.getName(), mainOptions),
+            vertx.deployVerticle(Main.RedisListenerVerticle.class.getName(), redisOptions)
         ).onFailure(cause -> {
-            System.err.println("Vertx Deploy Failed: " + cause.getMessage());
+            log.error("Vertx Deploy Failed: {}", cause.getMessage());
         });
     }
 
 
 
 
-
+    @Slf4j
     public static class RedisListenerVerticle extends AbstractVerticle {
 
         @Override
@@ -97,12 +100,12 @@ public class Main extends AbstractVerticle {
                 });
 
                 return conn.send(Request.cmd(Command.SUBSCRIBE)
-                        .arg(WS_CHANNEL)
-                        .arg(MQTT_CHANNEL))
-                        .compose(res -> {
-                            System.out.println("Redis Channel Subscribed. (" + WS_CHANNEL + ", " + MQTT_CHANNEL + ")");
-                            return Future.succeededFuture();
-                        });
+                    .arg(WS_CHANNEL)
+                    .arg(MQTT_CHANNEL))
+                    .compose(res -> {
+                        log.info("[START] Redis Channel Subscribed, ({}, {})", WS_CHANNEL, MQTT_CHANNEL);
+                        return Future.succeededFuture();
+                    });
             });
         }
     }
@@ -136,32 +139,31 @@ public class Main extends AbstractVerticle {
             startWebSocketServer()
         ).onSuccess(v -> {
             startPromise.complete();
-            System.out.println("ALL Services Started (MQTT: 1983, WS: 8383, Redis Listener: " + MQTT_CHANNEL + ", " + WS_CHANNEL + ")");
+            log.info("[START] ALL Services Started (MQTT: 1983, WS: 8383, Redis Listener: {}, {})", WS_CHANNEL, MQTT_CHANNEL);
         }).onFailure(cause -> {
-            startPromise.fail(cause);
-            System.err.println("Services Start failed.: " + cause.getMessage());
+            log.error("[START] Services Start Failed, {}", cause.getMessage());
         });
     }
 
     private Future<HttpServer> startWebSocketServer() {
        return vertx.createHttpServer()
         .webSocketHandler(ws -> {
-            System.out.println("[WS] Client Connected: " + ws.remoteAddress());
+            log.info("[WS] Client Connected: {}", ws.remoteAddress());
 
             Map<String, String> params = parseQuery(ws.query());
             String sessionToken = params.get("token");
 
             if (sessionToken == null || sessionToken.isEmpty() ) {
-                System.out.println("[WS] Session Token Empty. Close Connection.");
+                log.info("[WS] Session Token Empty, Close Connection");
                 ws.close();
                 return;
             }
 
-            System.out.println("[WS] Session Token: " + sessionToken);
+            log.info("[WS] Session Token: {}", sessionToken);
 
             Long sid = parseSessionId(sessionToken, "Laurel");
             if (sid == null ) {
-                System.out.println("[WS] Parse Session ID Failed. Close Connection.");
+                log.info("[WS] Parse Session ID Failed, Close Connection");
                 ws.close();
                 return;
             }
@@ -178,7 +180,7 @@ public class Main extends AbstractVerticle {
 
                         final String userId = tempUserId;
 
-                        System.out.println("[WS] Session Authenticated. User ID: " + userId);
+                        log.info("[WS] Session Authenticated. User ID: {}", userId);
 
                         userConnections.computeIfAbsent(userId, k -> new CopyOnWriteArrayList<>()).add(ws);
 
@@ -196,7 +198,7 @@ public class Main extends AbstractVerticle {
                                     userConnections.remove(userId);
                                 }
                             }
-                            System.out.println("[WS] Close Handler. Connection Removed. User ID: " + userId);
+                            log.info("[WS] Close Handler. Connection Removed. User ID: {}", userId);
                         });
 
                         // 3. 处理客户端的消息
@@ -209,35 +211,35 @@ public class Main extends AbstractVerticle {
 
                             byte[] messageBytes = BinaryMessageCodec.encode(message);
 
-                            webClient.post(8080, "127.0.0.1", "/system/upstream/ws")
+                            webClient.post(8585, "127.0.0.1", "/system/upstream/ws")
                                     .putHeader("Content-Type", "application/octet-stream")
                                     .sendBuffer(Buffer.buffer(messageBytes))
                                     .onSuccess(res -> {
-                                        System.out.println("[WS] Message From User (" + userId + ") Upstream OK. Length=" + message.getPayload().length);
+                                        log.info("[WS] Message From User ({}) Upstream OK. Length={}", userId, message.getPayload().length);
                                     })
                                     .onFailure(err -> {
-                                        System.err.println("[WS] Message From User (" + userId + ") Upstream Failed. Length=" + message.getPayload().length);
+                                        log.error("[WS] Message From User ({}) Upstream Failed. Length={}", userId, message.getPayload().length);
                                     });
                         });
 
 
                     } else {
-                        System.out.println("[WS] Session Auth Failed. Session Token: " + sessionToken + ", Session ID: " + sid);
+                        log.info("[WS] Session Auth Failed. Session Token: {}, Session ID: {}", sessionToken, sid);
                         ws.close();
                     }
                 })
                 .onFailure(cause -> {
-                    System.err.println("[WS] Session Redis Failed. Session Token: " + sessionToken + ". Close Connection. " + cause.getMessage());
+                    log.error("[WS] Session Redis Failed. Session Token: {}. Close Connection. {}", sessionToken, cause.getMessage());
                     ws.close();
                 });
 
         })
         .listen(8383)
         .onSuccess(server -> {
-            System.out.println("[WS] WebSocket Server Started. Listen 8383");
+            log.info("[WS] WebSocket Server Started. Listen 8383");
         })
         .onFailure(cause -> {
-            System.err.println("[WS] WebSocket Server Start Failed. " + cause.getMessage());
+            log.error("[WS] WebSocket Server Start Failed. {}", cause.getMessage());
         });
     }
 
@@ -247,7 +249,7 @@ public class Main extends AbstractVerticle {
 
         return mqttServer.endpointHandler(endpoint -> {
             String clientId = endpoint.clientIdentifier();
-            System.out.println("[MQTT] Client Connected: " + clientId);
+            log.info("[MQTT] Client Connected: {}", clientId);
 
             // 1. 注册会话
             MqttEndpoint old =clientConnections.put(clientId, endpoint);
@@ -263,12 +265,12 @@ public class Main extends AbstractVerticle {
             endpoint.disconnectHandler(v -> {
                 consumer.unregister();
                 clientConnections.remove(clientId);
-                System.out.println("[MQTT] Remove Client (" + clientId + ") From Connections.");
+                log.info("[MQTT] Remove Client ({}) From Connections", clientId);
             });
             endpoint.closeHandler(v -> {
                 consumer.unregister();
                 clientConnections.remove(clientId);
-                System.out.println("[MQTT] Remove Client (" + clientId + ") From Connections.");
+                log.info("[MQTT] Remove Client ({}) From Connections", clientId);
             });
 
             // 3. 处理客户端的订阅请求 (修复 MqttSubAckReasonCode 问题)
@@ -281,7 +283,7 @@ public class Main extends AbstractVerticle {
                 // ack the subscriptions request
                 endpoint.subscribeAcknowledge(subscribe.messageId(), grantedQoS);
 
-                System.out.println("[MQTT] Client (" + clientId + ") Subscribe " + subscribe.topicSubscriptions().size() + " Topic.");
+                log.info("[MQTT] Client ({}) Subscribe {} Topic", clientId, subscribe.topicSubscriptions().size());
             });
 
             // 3.1 处理客户端的消息
@@ -308,20 +310,20 @@ public class Main extends AbstractVerticle {
 
                 byte[] messageBytes = BinaryMessageCodec.encode(message);
 
-                webClient.post(8080, "127.0.0.1", "/system/upstream/mqtt")
+                webClient.post(8585, "127.0.0.1", "/system/upstream/mqtt")
                         .putHeader("Content-Type", "application/octet-stream")
                         .sendBuffer(Buffer.buffer(messageBytes))
                         .onSuccess(res -> {
-                            System.out.println("[MQTT] Message From Client (" + clientId + ") Upstream OK. Length=" + message.getPayload().length);
+                            log.info("[MQTT] Message From Client ({}) Upstream OK. Length={}", clientId, message.getPayload().length);
                         })
                         .onFailure(err -> {
-                            System.err.println("[MQTT] Message From Client (" + clientId + ") Upstream Failed. Length=" + message.getPayload().length);
+                            log.error("[MQTT] Message From Client ({}) Upstream Failed. Length={}", clientId, message.getPayload().length);
                         });
 
             }).publishReleaseHandler(messageId -> {
                 // QoS 2 流程的第二步: 服务器回复 PUBCOMP 完成握手
                 endpoint.publishComplete(messageId);
-                System.out.println("[MQTT] Receive QoS 2 PUBREL, Response PUBCOMP");
+                log.info("[MQTT] Receive QoS 2 PUBREL, Response PUBCOMP");
             });
 
             // 4. 处理 QoS 1 ACK (PUBACK) -> 服务器从 Redis 删除备份
@@ -334,7 +336,7 @@ public class Main extends AbstractVerticle {
             // 5.1 收到 PUBREC -> 服务器回复 PUBREL
             endpoint.publishReceivedHandler(packetId -> {
                 endpoint.publishRelease(packetId);
-                System.out.println("[MQTT] Receive QoS 2 PUBREC (Packet: " + packetId + "), Response PUBREL");
+                log.info("[MQTT] Receive QoS 2 PUBREC (Packet: {}), Response PUBREL", packetId);
             });
 
             // 5.2 收到 PUBCOMP -> 服务器从 Redis 删除备份
@@ -350,8 +352,8 @@ public class Main extends AbstractVerticle {
 
         })
         .listen(1983)
-        .onSuccess(s -> System.out.println("[MQTT] Server Started. Listen 1983"))
-        .onFailure(e -> System.err.println("[MQTT] Server Start Failed. " + e.getMessage()));
+        .onSuccess(s -> log.info("[MQTT] Server Started. Listen 1983"))
+        .onFailure(e -> log.error("[MQTT] Server Start Failed, {}", e.getMessage()));
     }
 
 
@@ -367,7 +369,7 @@ public class Main extends AbstractVerticle {
                 ws.writeTextMessage(new String(message.getPayload(), StandardCharsets.UTF_8));
                 // ws.writeBinaryMessage(Buffer.buffer(message.getPayload()));
 
-                System.out.println("[WS] Message Sent. User=" + message.getTo() + ", Length=" + message.getPayload().length);
+                log.info("[WS] Message Sent. User={}, Length={}", message.getTo(), message.getPayload().length);
 
             } else {
                 String userId = message.getTo();
@@ -379,7 +381,7 @@ public class Main extends AbstractVerticle {
             }
 
         } catch (Exception e) {
-            System.err.println("[WS] Handle Redis PUB/SUB Message Error. " + e.getMessage() + ", Length=" + (messageBytes != null ? messageBytes.length : 0));
+            log.error("[WS] Handle WS Message Error: {}, Length={}", e.getMessage(), (messageBytes != null ? messageBytes.length : 0));
         }
     }
 
@@ -404,7 +406,7 @@ public class Main extends AbstractVerticle {
             return id;
 
         } catch (NumberFormatException e) {
-            System.err.println("[WS] Parse Session Id, NumberFormatException: " + token36);
+            log.error("[WS] Parse Session Id, NumberFormatException: {}", token36);
             return null;
         }
     }
@@ -441,55 +443,60 @@ public class Main extends AbstractVerticle {
     
     private void handleMQTTMessage(MqttEndpoint endpoint, byte[] messageBytes) {
 
-        BinaryMessageCodec.Message message = BinaryMessageCodec.decode(messageBytes);
+        try {
 
-        if (message.getId() == null || message.getId().isEmpty()
-                || message.getTopic() == null || message.getTopic().isEmpty()
-                || message.getTo() == null || message.getTo().isEmpty()
-                || message.getPayload() == null) {
-            return;
-        }
+            BinaryMessageCodec.Message message = BinaryMessageCodec.decode(messageBytes);
 
-        if (message.getQos() == null) {
-            message.setQos(MqttQoS.AT_MOST_ONCE.value());
-        }
+            if (message.getId() == null || message.getId().isEmpty()
+                    || message.getTopic() == null || message.getTopic().isEmpty()
+                    || message.getTo() == null || message.getTo().isEmpty()
+                    || message.getPayload() == null) {
+                return;
+            }
 
-        byte[] payload = message.getPayload();
-        Integer qosLevel = message.getQos();
-        String redisMsgId = message.getId();
-        String topic = message.getTopic();
+            if (message.getQos() == null) {
+                message.setQos(MqttQoS.AT_MOST_ONCE.value());
+            }
 
-        if (message.getQos().equals(MqttQoS.EXACTLY_ONCE.value()) || message.getQos().equals(MqttQoS.AT_LEAST_ONCE.value()) )  {
+            byte[] payload = message.getPayload();
+            Integer qosLevel = message.getQos();
+            String redisMsgId = message.getId();
+            String topic = message.getTopic();
 
-            String redisKey = "mqtt:msg:" + message.getTo();
+            if (message.getQos().equals(MqttQoS.EXACTLY_ONCE.value()) || message.getQos().equals(MqttQoS.AT_LEAST_ONCE.value()) )  {
 
-            List<Request> batch = new ArrayList<>();
-            batch.add(Request.cmd(Command.HSET)
-                    .arg(Buffer.buffer(redisKey))
-                    .arg(Buffer.buffer(message.getId()))
-                    .arg(Buffer.buffer(messageBytes)));
-            batch.add(Request.cmd(Command.EXPIRE)
-                    .arg(Buffer.buffer(redisKey))
-                    .arg(Buffer.buffer(String.valueOf(3600 * 36))));
-            batch.add(Request.cmd(Command.HLEN)
-                    .arg(Buffer.buffer(redisKey)));
+                String redisKey = "mqtt:msg:" + message.getTo();
 
-            redis.batch(batch)
-                .onSuccess(res -> {
+                List<Request> batch = new ArrayList<>();
+                batch.add(Request.cmd(Command.HSET)
+                        .arg(Buffer.buffer(redisKey))
+                        .arg(Buffer.buffer(message.getId()))
+                        .arg(Buffer.buffer(messageBytes)));
+                batch.add(Request.cmd(Command.EXPIRE)
+                        .arg(Buffer.buffer(redisKey))
+                        .arg(Buffer.buffer(String.valueOf(3600 * 36))));
+                batch.add(Request.cmd(Command.HLEN)
+                        .arg(Buffer.buffer(redisKey)));
 
-                    sendMqttMessage(endpoint, redisMsgId, topic, payload, MqttQoS.valueOf(qosLevel));
+                redis.batch(batch)
+                    .onSuccess(res -> {
 
-                    Response hLenRes = res.get(2);
-                    long messageCount = (hLenRes != null) ? hLenRes.toLong() : 0L;
-                    if (messageCount >= 7) {
-                        System.err.println("[MQTT] Client " + message.getTo() + " has " + messageCount + " offline messages!");
-                    }
-                })
-                .onFailure(e -> System.err.println("[MQTT] QoS " + message.getQos() + " Message Persisted Failed: Client ID (" + message.getTo() + ")"));
+                        sendMqttMessage(endpoint, redisMsgId, topic, payload, MqttQoS.valueOf(qosLevel));
 
-        } else if (message.getQos().equals(MqttQoS.AT_MOST_ONCE.value())) {
+                        Response hLenRes = res.get(2);
+                        long messageCount = (hLenRes != null) ? hLenRes.toLong() : 0L;
+                        if (messageCount >= 7) {
+                            log.error("[MQTT] Client ({}) Has {} Offline Messages", message.getTo(), messageCount);
+                        }
+                    })
+                    .onFailure(e -> log.error("[MQTT] QoS {} Message Persisted Failed: Client ID ({})", message.getQos(), message.getTo()));
 
-            sendMqttMessage(endpoint, redisMsgId, topic, payload, MqttQoS.valueOf(qosLevel));
+            } else if (message.getQos().equals(MqttQoS.AT_MOST_ONCE.value())) {
+
+                sendMqttMessage(endpoint, redisMsgId, topic, payload, MqttQoS.valueOf(qosLevel));
+            }
+        } catch (Exception e) {
+            log.error("[MQTT] Handle MQTT Message Error: {}, Length={}", e.getMessage(), (messageBytes != null ? messageBytes.length : 0));
         }
     }
 
@@ -512,20 +519,20 @@ public class Main extends AbstractVerticle {
                             false
                         )
                         // 成功时执行 (onSuccess 接收 Integer 类型的 mqttPacketId)
-                        .onSuccess(mqttPacketId -> {
+                        .onSuccess(packetId -> {
                             if (redisMsgId != null) {
-                                String mapKey = getMapKey(endpoint.clientIdentifier(), mqttPacketId);
+                                String mapKey = endpoint.clientIdentifier() + ":" + packetId;
                                 pendingAckMap.put(mapKey, redisMsgId);
                             }
-                            System.out.println("[MQTT] QoS " + qos.value() + " Message Sent. PacketId=" + mqttPacketId + ", Topic=" + topic + ", Length=" + payload.length);
+                            log.info("[MQTT] QoS {} Message Sent, PacketId={}, Topic={}, Length={}", qos.value(), packetId, topic, payload.length);
                         })
                         // 失败时执行 (onFailure 接收 Throwable 类型的 cause)
                         .onFailure(cause -> {
                             // 如果发送失败，消息仍在 Redis 中，等待客户端重连
-                            System.err.println("[MQTT] QoS " + qos.value() + " Message Send Failed. Topic=" + topic + ". " + cause.getMessage());
+                            log.error("[MQTT] QoS {} Message Send Failed, Topic={}, Error={}", qos.value(), topic, cause.getMessage());
                         });
                     } else {
-                        System.err.println("[MQTT] QoS " + qos.value() + " Message Lock Failed. Topic=" + topic + ", Id=" + redisMsgId);
+                        log.error("[MQTT] QoS {} Message Lock Failed. Topic={}, MessageId={}", qos.value(), topic, redisMsgId);
                     }
                 });
 
@@ -538,10 +545,10 @@ public class Main extends AbstractVerticle {
                 false
             )
             .onSuccess(mqttPacketId -> {
-                System.out.println("[MQTT] QoS " + qos.value() + " Message Sent. PacketId=" + mqttPacketId + ", Topic=" + topic + ", Length=" + payload.length);
+                log.info("[MQTT] QoS {} Message Sent, PacketId=" + mqttPacketId + ", Topic={}, Length={}", qos.value(), topic, payload.length);
             })
             .onFailure(cause -> {
-                System.err.println("[MQTT] QoS " + qos.value() + " Message Send Failed. Topic=" + topic + ". " + cause.getMessage());
+                log.error("[MQTT] QoS {} Message Send Failed, Topic={}, Error={}", qos.value(), topic, cause.getMessage());
             });
         }
     }
@@ -557,7 +564,7 @@ public class Main extends AbstractVerticle {
             .onSuccess(response -> {
                 if (response == null || response.size() == 0) return;
 
-                System.out.println("[MQTT] Client (" + clientId + ") Offline Message Count: " + response.getKeys().size() + ". Start Send.");
+                log.info("[MQTT] Client ({}) Offline Message Count={}, Start Send", clientId, response.getKeys().size());
 
                 for (String redisMsgId : response.getKeys()) {
 
@@ -582,57 +589,21 @@ public class Main extends AbstractVerticle {
                     sendMqttMessage(endpoint, redisMsgId, topic, payload, MqttQoS.valueOf(qosLevel));
                 }
             })
-            .onFailure(e -> System.err.println("[MQTT] Client (" + clientId + ") Offline Message Fetch Error. " + e.getMessage()));
+            .onFailure(e -> log.error("[MQTT] Client ({}) Offline Message Fetch Error={}", clientId, e.getMessage()));
     }
 
     private void confirmAndRemoveFromRedis(String clientId, int packetId, String context) {
-        String mapKey = getMapKey(clientId, packetId);
+        String mapKey = clientId + ":" + packetId;
         String redisMsgId = pendingAckMap.remove(mapKey);
 
         if (redisMsgId != null) {
 
             redisAPI.hdel(Arrays.asList("mqtt:msg:" + clientId, redisMsgId))
-                    .onSuccess(res -> System.out.println("[MQTT] ACK [" + context + "] And Redis Message Deleted. Client=" + clientId + ", MsgId=" + packetId))
-                    .onFailure(e -> System.err.println("[MQTT] ACK [" + context + "] And Delete Redis Message Failed. " + e.getMessage()));
+                    .onSuccess(res -> log.info("[MQTT] ACK [{}] And Redis Message Deleted. Client={}, PacketId={}",context, clientId, packetId))
+                    .onFailure(e -> log.error("[MQTT] ACK [{}] And Delete Redis Message Failed, Error={}", context, e.getMessage()));
         } else {
-            System.out.println("[MQTT] ACK [" + context + "] And Redis Message ID Not In Pending Ack Map. Client=" + clientId + ", PacketId=" + packetId);
+            log.info("[MQTT] ACK [{}] And Redis Message ID Not In Pending Ack Map, Client={}, PacketId={}", context, clientId, packetId);
         }
     }
 
-    private String getMapKey(String clientId, int packetId) {
-        return clientId + ":" + packetId;
-    }
-
-
-
-
-
-
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
