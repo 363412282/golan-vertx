@@ -157,12 +157,12 @@ public class Main extends AbstractVerticle {
 
             List<Request> batch = new ArrayList<>();
             batch.add(Request.cmd(Command.HSET)
-                    .arg(Buffer.buffer(msgKey))
-                    .arg(Buffer.buffer(message.getId()))
+                    .arg(msgKey)
+                    .arg(message.getId())
                     .arg(Buffer.buffer(messageBytes)));
             batch.add(Request.cmd(Command.EXPIRE)
-                    .arg(Buffer.buffer(msgKey))
-                    .arg(Buffer.buffer(String.valueOf(3600 * 36))));
+                    .arg(msgKey)
+                    .arg(String.valueOf(3600 * 36)));
 
             redis.batch(batch)
                     .onSuccess(res -> {
@@ -565,12 +565,12 @@ public class Main extends AbstractVerticle {
 
                                 List<Request> batch = new ArrayList<>();
                                 batch.add(Request.cmd(Command.HSET)
-                                    .arg(Buffer.buffer(ackKey))
-                                    .arg(Buffer.buffer(packetId))
-                                    .arg(Buffer.buffer(redisMsgId)));
+                                    .arg(ackKey)
+                                    .arg(String.valueOf(packetId))
+                                    .arg(redisMsgId));
                                 batch.add(Request.cmd(Command.EXPIRE)
-                                    .arg(Buffer.buffer(ackKey))
-                                    .arg(Buffer.buffer(String.valueOf(60))));
+                                    .arg(ackKey)
+                                    .arg(String.valueOf(60)));
                                 redis.batch(batch)
                                     .onSuccess(r -> {})
                                     .onFailure(e -> {});
