@@ -122,11 +122,13 @@ public class Main extends AbstractVerticle {
                 if (WS_CHANNEL.equals(channel)) {
                     vertx.eventBus().publish(WS_CHANNEL, messageBytes);
                 } else if (MQTT_CHANNEL.equals(channel)) {
-                    processMqttMessage(messageBytes);
+                    // processMqttMessage(messageBytes);
+                    vertx.eventBus().publish(MQTT_CHANNEL, messageBytes);
                 }
             }
         }
 
+        /*
         private void processMqttMessage(byte[] messageBytes) {
             try {
                 BinaryMessageCodec.Message message = BinaryMessageCodec.decode(messageBytes);
@@ -171,6 +173,7 @@ public class Main extends AbstractVerticle {
                     .onFailure(e -> log.error("[REDIS] QoS {} Message Persisted Failed: Client ID ({})", message.getQos(), message.getTo()));
 
         }
+        */
 
     }
 
