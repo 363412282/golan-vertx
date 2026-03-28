@@ -9,6 +9,7 @@ import io.vertx.ext.web.client.WebClient;
 import io.vertx.ext.web.client.WebClientOptions;
 import io.vertx.mqtt.MqttEndpoint;
 import io.vertx.mqtt.MqttServer;
+import io.vertx.mqtt.MqttServerOptions;
 import io.vertx.mqtt.MqttTopicSubscription;
 import io.vertx.redis.client.*;
 import lombok.extern.slf4j.Slf4j;
@@ -317,6 +318,10 @@ public class Main extends AbstractVerticle {
             handleMQTTMessage(msg.body());
         });
 
+        MqttServerOptions options = new MqttServerOptions()
+                .setMaxMessageSize(8192)
+                .setTimeoutOnConnect(120);
+
         MqttServer mqttServer = MqttServer.create(vertx);
 
         return mqttServer.endpointHandler(endpoint -> {
@@ -410,10 +415,21 @@ public class Main extends AbstractVerticle {
                 confirmAndRemoveFromRedis(clientId, packetId, "QoS 2 (PUBCOMP)");
             });
 
-            // 6. 接受连接
+            // 6. 处理客户端心跳
+            endpoint.pingHandler(v -> {
+                log.info("[MQTT] Received PING from Client ({})", clientId);
+                // Vert.x 会自动回复 PINGRESP，这里只是记录日志
+            });
+
+            // 6.1 KeepAlive
+            int keepAlive = endpoint.keepAliveTimeSeconds();
+            log.info("[MQTT] Client ({}) Keep Alive: {}s, Timeout will be: {}s",
+                    clientId, keepAlive, (int)(keepAlive * 1.5));
+
+            // 7. 接受连接
             endpoint.accept(false);
 
-            // 7. 检查是否有离线消息并补发
+            // 8. 检查是否有离线消息并补发
             checkAndSendOfflineMessages(endpoint);
 
         })
