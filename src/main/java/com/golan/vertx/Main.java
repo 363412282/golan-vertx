@@ -320,8 +320,6 @@ public class Main extends AbstractVerticle {
 
         MqttServerOptions options = new MqttServerOptions();
         options.setMaxMessageSize(8192);
-        options.setTcpKeepAlive(false);
-        options.setIdleTimeout(0);
         options.setTimeoutOnConnect(120);
 
         MqttServer mqttServer = MqttServer.create(vertx);
