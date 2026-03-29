@@ -336,12 +336,29 @@ public class Main extends AbstractVerticle {
 
             // 2. 连接断开处理
             endpoint.disconnectHandler(v -> {
-                clientConnections.remove(clientId);
-                log.info("[MQTT] Remove Client ({}) From Connections", clientId);
+
+                log.info("[MQTT] disconnect ({}) endpoint={}", clientId, System.identityHashCode(endpoint));
+
+                clientConnections.computeIfPresent(clientId, (id, ep) -> {
+                    if (ep == endpoint) {
+                        log.info("[MQTT] disconnectHandler Remove Client ({})", clientId);
+                        return null; // remove
+                    }
+                    return ep;
+                });
             });
+
             endpoint.closeHandler(v -> {
-                clientConnections.remove(clientId);
-                log.info("[MQTT] Remove Client ({}) From Connections", clientId);
+
+                log.info("[MQTT] close ({}) endpoint={}", clientId, System.identityHashCode(endpoint));
+
+                clientConnections.computeIfPresent(clientId, (id, ep) -> {
+                    if (ep == endpoint) {
+                        log.info("[MQTT] closeHandler Remove Client ({})", clientId);
+                        return null;
+                    }
+                    return ep;
+                });
             });
 
             // 3. 处理客户端的订阅请求 (修复 MqttSubAckReasonCode 问题)
