@@ -32,7 +32,7 @@ public class Main extends AbstractVerticle {
 
     private WebClient webClient;
 
-    private final Map<String, List<ServerWebSocket>> userConnections = new ConcurrentHashMap<>();
+    private final Map<String, CopyOnWriteArrayList<ServerWebSocket>> userConnections = new ConcurrentHashMap<>();
 
     private final Map<String, MqttEndpoint> clientConnections = new ConcurrentHashMap<>();
 
@@ -222,7 +222,7 @@ public class Main extends AbstractVerticle {
 
        return vertx.createHttpServer()
         .webSocketHandler(ws -> {
-            log.info("[WS] Client Connected: {}", ws.remoteAddress());
+            log.info("[WS] Client Connected: {}, ws: {}", ws.remoteAddress(), System.identityHashCode(ws));
 
             Map<String, String> params = parseQuery(ws.query());
             String sessionToken = params.get("token");
@@ -254,21 +254,37 @@ public class Main extends AbstractVerticle {
 
                         final String userId = tempUserId;
 
-                        log.info("[WS] Session Authenticated. User ID: {}", userId);
-
-                        userConnections.computeIfAbsent(userId, k -> new CopyOnWriteArrayList<>()).add(ws);
+                        log.info("[WS] Session Authenticated. User ID: {}, ws: {}", userId, System.identityHashCode(ws));
 
                         // 2. 连接断开处理
                         ws.closeHandler(v -> {
-                            List<ServerWebSocket> connections = userConnections.get(userId);
-                            if (connections != null) {
+                            log.warn("[WS] Close Handler. User ID: {}, ws: {}", userId, System.identityHashCode(ws));
+                            userConnections.computeIfPresent(userId, (id, connections) -> {
                                 connections.remove(ws);
                                 if (connections.isEmpty()) {
-                                    userConnections.remove(userId);
+                                    log.info("[WS] Close Handler. Connection Removed. User ID: {}, ws: {}", userId, System.identityHashCode(ws));
+                                    return null; // remove user
                                 }
-                            }
-                            log.info("[WS] Close Handler. Connection Removed. User ID: {}", userId);
+                                return connections;
+                            });
                         });
+
+                        // 2.1 异常处理
+                        ws.exceptionHandler(err -> {
+                            log.warn("[WS] Exception Handler. User ID: {}, ws: {}, Error: {}", userId, System.identityHashCode(ws), err.getMessage());
+                            userConnections.computeIfPresent(userId, (id, connections) -> {
+                                connections.remove(ws);
+                                if (connections.isEmpty()) {
+                                    log.info("[WS] Exception Handler. Connection Removed. User ID: {}, ws: {}", userId, System.identityHashCode(ws));
+                                    return null; // remove user
+                                }
+                                return connections;
+                            });
+                        });
+
+                        // 1.1 注册连接在close回调之后
+
+                        userConnections.computeIfAbsent(userId, k -> new CopyOnWriteArrayList<>()).add(ws);
 
                         // 3. 处理客户端的消息
                         ws.handler(buffer -> {
@@ -330,7 +346,7 @@ public class Main extends AbstractVerticle {
 
             // 1. 注册会话
             MqttEndpoint old = clientConnections.put(clientId, endpoint);
-            if (old != null) {
+            if (old != null && old != endpoint) {
                 old.close();
             }
 
@@ -455,9 +471,7 @@ public class Main extends AbstractVerticle {
         .onFailure(e -> log.error("[MQTT] Server Start Failed, {}", e.getMessage()));
     }
 
-
     private void handleWSMessage(byte[] messageBytes) {
-
         try {
             BinaryMessageCodec.Message message = BinaryMessageCodec.decode(messageBytes);
 
@@ -465,31 +479,33 @@ public class Main extends AbstractVerticle {
                 return;
             }
 
-            List<ServerWebSocket> wsList = userConnections.get(message.getTo());
-            if (wsList == null) {
-                return;
-            }
-            wsList.removeIf(ServerWebSocket::isClosed);
-            if (wsList.isEmpty()) {
-                userConnections.remove(message.getTo());
-                return;
-            }
+            userConnections.computeIfPresent(message.getTo(), (userId, wsList) -> {
 
-            int i = 0;
-            for (ServerWebSocket ws : wsList) {
-                if (!ws.isClosed()) {
-                    if (ws.writeQueueFull()) {
-                        log.warn("[WS] Write Queue Full, User={}, Discard", message.getTo());
-                        continue;
-                    }
-                    ws.writeTextMessage(new String(message.getPayload(), StandardCharsets.UTF_8));
-                    // ws.writeBinaryMessage(Buffer.buffer(message.getPayload()));
-                    log.info("[WS] Message Sent, User={}, Index={}, Length={}", message.getTo(), i, message.getPayload().length);
-                    i++;
+                wsList.removeIf(ws -> ws.isClosed() || ws.writeQueueFull());
+
+                if (wsList.isEmpty()) {
+                    log.info("[WS] All connections closed, remove user {}", userId);
+                    return null;
                 }
-            }
+
+                int sentCount = 0;
+                for (ServerWebSocket ws : wsList) {
+                    if (ws.isClosed()) continue;
+                    try {
+                        ws.writeBinaryMessage(Buffer.buffer(message.getPayload()));
+                        sentCount++;
+                    } catch (Exception e) {
+                        log.error("[WS] Write Failed, User={}, Error={}", userId, e.getMessage());
+                    }
+                }
+
+                log.info("[WS] Message Sent, User={}, Count={}, Length={}", userId, sentCount, message.getPayload().length);
+
+                return wsList;
+            });
+
         } catch (Exception e) {
-            log.error("[WS] Handle WS Message Error: {}, Length={}", e.getMessage(), (messageBytes != null ? messageBytes.length : 0));
+            log.error("[WS] Handle WS Message Error: {}, Length={}", e.getMessage(), messageBytes != null ? messageBytes.length : 0, e);
         }
     }
 
