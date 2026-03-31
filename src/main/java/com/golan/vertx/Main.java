@@ -492,7 +492,8 @@ public class Main extends AbstractVerticle {
                 for (ServerWebSocket ws : wsList) {
                     if (ws.isClosed()) continue;
                     try {
-                        ws.writeBinaryMessage(Buffer.buffer(message.getPayload()));
+                        ws.writeTextMessage(new String(message.getPayload(), StandardCharsets.UTF_8));
+                        // ws.writeBinaryMessage(Buffer.buffer(message.getPayload()));
                         sentCount++;
                     } catch (Exception e) {
                         log.error("[WS] Write Failed, User={}, Error={}", userId, e.getMessage());
